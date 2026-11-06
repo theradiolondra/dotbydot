@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <title>Directional Dot-to-Dot Generator</title>
+    <!-- jsPDF Bibliothek für saubere Vektor-PDFs direkt im Browser -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
@@ -38,12 +40,12 @@
         }
         button:hover { background: #cc0000; }
         #status { font-family: monospace; margin-top: 15px; font-size: 0.9rem; }
-        canvas { border: 1px solid #ddd; margin-top: 20px; max-width: 100%; display: none; }
+        canvas { border: 1px solid #ddd; margin-top: 20px; max-width: 100%; display: none; background: #fff; }
     </style>
 </head>
 <body>
 
-    <h2>Directional Dot-to-Dot Converter</h2>
+    <h2>Directional Dot-to-Dot Converter (PDF)</h2>
     <p>Ziehe deine FiniteCurve-SVG hierher oder klicke, um sie auszuwählen:</p>
 
     <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
@@ -52,7 +54,7 @@
     </div>
 
     <div id="status"></div>
-    <button id="downloadBtn">⬇ FERTIGE VORLAGE HERUNTERLADEN (SVG)</button>
+    <button id="downloadBtn">⬇ DRUCKREIFE PDF HERUNTERLADEN</button>
     <br>
     <canvas id="previewCanvas"></canvas>
 
@@ -64,7 +66,9 @@
         const canvas = document.getElementById('previewCanvas');
         const ctx = canvas.getContext('2d');
 
-        let processedSvgString = "";
+        let globalFilteredPoints = [];
+        let globalBounds = null;
+        let originalFileName = "puzzle";
 
         dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.background = '#e2e2e2'; });
         dropzone.addEventListener('dragleave', () => { dropzone.style.background = '#fafafa'; });
@@ -78,15 +82,17 @@
         });
 
         function handleFile(file) {
+            originalFileName = file.name.replace(/\.[^/.]+$/, "");
             status.textContent = `Lese "${file.name}" ein...`;
             const reader = new FileReader();
             reader.onload = function(e) {
                 try {
                     processSVG(e.target.result);
-                    status.textContent = "Erfolgreich verarbeitet!";
+                    status.textContent = `Erfolgreich! ${globalFilteredPoints.length} Punkte extrahiert.`;
                     downloadBtn.style.display = 'inline-block';
                 } catch (err) {
                     status.textContent = "Fehler beim Verarbeiten: " + err.message;
+                    console.error(err);
                 }
             };
             reader.readAsText(file);
@@ -96,9 +102,9 @@
             const parser = new DOMParser();
             const doc = parser.parseFromString(svgText, "image/svg+xml");
             
-            // Extrahiere alle Punkte aus <path>, <polyline>, <line>
             let rawPoints = [];
             
+            // Exakte Vektor-Extraktion wie im funktionierenden Python-Skript
             doc.querySelectorAll('path, polyline, line, polygon').forEach(el => {
                 let d = el.getAttribute('d') || el.getAttribute('points') || '';
                 let nums = d.match(/[-+]?[0-9]*\.?[0-9]+/g);
@@ -110,9 +116,9 @@
                 }
             });
 
-            if (rawPoints.length < 5) throw new Error("Keine ausreichenden Pfade gefunden.");
+            if (rawPoints.length < 5) throw new Error("Keine ausreichenden Pfade in der SVG gefunden.");
 
-            // Eck- und Kurvenfilter (min_dist_px = 12, min_angle = 8°)
+            // Exakter Eck- und Kurvenfilter (min_dist_px = 12, min_angle = 8°)
             let filtered = [rawPoints[0]];
             let lastIdx = 0;
             const minAngleDeg = 8.0;
@@ -141,15 +147,17 @@
                 }
             }
             filtered.push(rawPoints[rawPoints.length - 1]);
+            globalFilteredPoints = filtered;
 
-            // Bounding Box ermitteln
+            // Bounding Box
             let xs = filtered.map(p => p.x);
             let ys = filtered.map(p => p.y);
             let minX = Math.min(...xs), maxX = Math.max(...xs);
             let minY = Math.min(...ys), maxY = Math.max(...ys);
             let w = maxX - minX || 1, h = maxY - minY || 1;
+            globalBounds = { minX, minY, w, h };
 
-            // Zeichne Live-Vorschau auf Canvas
+            // Vorschau auf Canvas zeichnen
             canvas.width = 600;
             canvas.height = (h / w) * 600;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -164,41 +172,30 @@
                 return { x: (p.x + offsetX) * scale, y: (p.y + offsetY) * scale };
             }
 
-            // Zeichne Richtungsstriche & Punkte
             ctx.strokeStyle = "#000";
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.0;
             ctx.fillStyle = "#000";
-
-            let svgOutputNodes = '';
 
             for (let i = 0; i < filtered.length - 1; i++) {
                 let p1 = trans(filtered[i]);
-                let p2 = trans(filtered[i+1]);
-
-                // Vektor für kurzen Strich
+                
+                // Richtungsstrich (Ultrakurz für Inkjet)
                 let vx = filtered[i+1].x - filtered[i].x;
                 let vy = filtered[i+1].y - filtered[i].y;
                 let len = Math.hypot(vx, vy) || 1;
                 let ux = vx / len, uy = vy / len;
 
-                // Strich-Endpunkt (ca. 6 Pixel lang für sauberen Tintenstrahl-Druck)
-                let tickLen = 6.0;
+                let tickLen = 5.0; // Kurzer Strich
                 let tEnd = { x: filtered[i].x + ux * tickLen, y: filtered[i].y + uy * tickLen };
                 let pTickEnd = trans(tEnd);
 
-                // Canvas Strich zeichnen
                 ctx.beginPath();
                 ctx.moveTo(p1.x, p1.y);
                 ctx.lineTo(pTickEnd.x, pTickEnd.y);
                 ctx.stroke();
 
-                // SVG Code für Export generieren
-                svgOutputNodes += `<line x1="${filtered[i].x}" y1="${filtered[i].y}" x2="${tEnd.x}" y2="${tEnd.y}" stroke="black" stroke-width="0.7"/>\n`;
-                svgOutputNodes += `<circle cx="${filtered[i].x}" cy="${filtered[i].y}" r="1.5" fill="black"/>\n`;
-
-                // Canvas Punkt
                 ctx.beginPath();
-                ctx.arc(p1.x, p1.y, 2.5, 0, Math.PI * 2);
+                ctx.arc(p1.x, p1.y, 2.0, 0, Math.PI * 2);
                 ctx.fill();
             }
 
@@ -208,26 +205,80 @@
             ctx.beginPath();
             ctx.arc(pStart.x, pStart.y, 4, 0, Math.PI * 2);
             ctx.fill();
-            svgOutputNodes += `<circle cx="${filtered[0].x}" cy="${filtered[0].y}" r="3.5" fill="#E60000"/>\n`;
 
             canvas.style.display = 'block';
-
-            // Erstelle saubere SVG zum Download
-            processedSvgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - 10} ${minY - 10} {w + 20} {h + 20}" width="${w}px" height="${h}px">\n` +
-                                 `<rect width="100%" height="100%" fill="white"/>\n` +
-                                 svgOutputNodes +
-                                 `</svg>`;
         }
 
         downloadBtn.onclick = function() {
-            const blob = new Blob([processedSvgString], { type: 'image/svg+xml' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'puzzle_vorlage.svg';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+            if (!globalFilteredPoints.length) return;
+
+            const { jsPDF } = window.jspdf;
+            
+            // Definiere Druckformat: 12 Zoll Breite im Verhältnis
+            let baseWidthInches = 12.0;
+            let aspect = globalBounds.h / globalBounds.w;
+            let baseHeightInches = baseWidthInches * aspect;
+
+            const pdf = new jsPDF({
+                orientation: baseWidthInches > baseHeightInches ? 'l' : 'p',
+                unit: 'in',
+                format: [baseWidthInches, baseHeightInches]
+            });
+
+            pdf.setFillColor(255, 255, 255);
+            pdf.rect(0, 0, baseWidthInches, baseHeightInches, 'F');
+
+            let margin = baseWidthInches * 0.025;
+            let drawW = baseWidthInches - (margin * 2);
+            let drawH = baseHeightInches - (margin * 2);
+
+            let scaleX = drawW / globalBounds.w;
+            let scaleY = drawH / globalBounds.h;
+            let scale = Math.min(scaleX, scaleY);
+
+            function pdfTrans(p) {
+                return {
+                    x: margin + (p.x - globalBounds.minX) * scale,
+                    y: margin + (p.y - globalBounds.minY) * scale
+                };
+            }
+
+            // Zeichne Richtungsstriche ins PDF
+            pdf.setDrawColor(0, 0, 0);
+            pdf.setLineWidth(0.007); // ca. 0.5 pt Strichstärke
+
+            for (let i = 0; i < globalFilteredPoints.length - 1; i++) {
+                let p1 = pdfTrans(globalFilteredPoints[i]);
+
+                let vx = globalFilteredPoints[i+1].x - globalFilteredPoints[i].x;
+                let vy = globalFilteredPoints[i+1].y - globalFilteredPoints[i].y;
+                let len = Math.hypot(vx, vy) || 1;
+                let ux = vx / len, uy = vy / len;
+
+                // Skaliere Strichlänge passend für Zoll-PDF (ca. 0.04 Zoll = ~3pt)
+                let tickLen = 0.04;
+                let tEnd = { 
+                    x: globalFilteredPoints[i].x + ux * (tickLen * (globalBounds.w / drawW)), 
+                    y: globalFilteredPoints[i].y + uy * (tickLen * (globalBounds.h / drawH)) 
+                };
+                let p2 = pdfTrans(tEnd);
+
+                pdf.line(p1.x, p1.y, p2.x, p2.y);
+            }
+
+            // Zeichne reguläre Punkte (Schwarz)
+            pdf.setFillColor(0, 0, 0);
+            for (let i = 1; i < globalFilteredPoints.length; i++) {
+                let pt = pdfTrans(globalFilteredPoints[i]);
+                pdf.circle(pt.x, pt.y, 0.015, 'F'); // ca. 2.1 pt Radius
+            }
+
+            // Zeichne Startpunkt (Rot)
+            pdf.setFillColor(230, 0, 0);
+            let startPt = pdfTrans(globalFilteredPoints[0]);
+            pdf.circle(startPt.x, startPt.y, 0.035, 'F'); // Größerer roter Startpunkt
+
+            pdf.save(originalFileName + "_inkjet_ticks.pdf");
         };
     </script>
 
