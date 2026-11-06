@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Directional Dot-to-Dot Generator</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+            background: #f4f4f4;
+            color: #111;
+            max-width: 700px;
+            margin: 40px auto;
+            padding: 30px;
+            border: 2px solid #111;
+            background: #fff;
+        }
+        h2 { margin-top: 0; font-size: 1.4rem; letter-spacing: -0.5px; }
+        .dropzone {
+            border: 2px dashed #111;
+            padding: 40px;
+            text-align: center;
+            background: #fafafa;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: background 0.2s;
+        }
+        .dropzone:hover { background: #f0f0f0; }
+        button {
+            background: #E60000;
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            font-family: monospace;
+            display: none;
+        }
+        button:hover { background: #cc0000; }
+        #status { font-family: monospace; margin-top: 15px; font-size: 0.9rem; }
+        canvas { border: 1px solid #ddd; margin-top: 20px; max-width: 100%; display: none; }
+    </style>
+</head>
+<body>
+
+    <h2>Directional Dot-to-Dot Converter</h2>
+    <p>Ziehe deine FiniteCurve-SVG hierher oder klicke, um sie auszuwählen:</p>
+
+    <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
+        <span id="dropText">SVG-Datei hier ablegen (.svg)</span>
+        <input type="file" id="fileInput" accept=".svg" style="display: none;">
+    </div>
+
+    <div id="status"></div>
+    <button id="downloadBtn">⬇ FERTIGE VORLAGE HERUNTERLADEN (SVG)</button>
+    <br>
+    <canvas id="previewCanvas"></canvas>
+
+    <script>
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('fileInput');
+        const status = document.getElementById('status');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const canvas = document.getElementById('previewCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let processedSvgString = "";
+
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.background = '#e2e2e2'; });
+        dropzone.addEventListener('dragleave', () => { dropzone.style.background = '#fafafa'; });
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.style.background = '#fafafa';
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleFile(e.target.files[0]);
+        });
+
+        function handleFile(file) {
+            status.textContent = `Lese "${file.name}" ein...`;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    processSVG(e.target.result);
+                    status.textContent = "Erfolgreich verarbeitet!";
+                    downloadBtn.style.display = 'inline-block';
+                } catch (err) {
+                    status.textContent = "Fehler beim Verarbeiten: " + err.message;
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function processSVG(svgText) {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(svgText, "image/svg+xml");
+            
+            // Extrahiere alle Punkte aus <path>, <polyline>, <line>
+            let rawPoints = [];
+            
+            doc.querySelectorAll('path, polyline, line, polygon').forEach(el => {
+                let d = el.getAttribute('d') || el.getAttribute('points') || '';
+                let nums = d.match(/[-+]?[0-9]*\.?[0-9]+/g);
+                if (nums && nums.length >= 4) {
+                    let floats = nums.map(Number);
+                    for (let i = 0; i < floats.length - 1; i += 2) {
+                        rawPoints.push({ x: floats[i], y: floats[i+1] });
+                    }
+                }
+            });
+
+            if (rawPoints.length < 5) throw new Error("Keine ausreichenden Pfade gefunden.");
+
+            // Eck- und Kurvenfilter (min_dist_px = 12, min_angle = 8°)
+            let filtered = [rawPoints[0]];
+            let lastIdx = 0;
+            const minAngleDeg = 8.0;
+            const minDist = 12.0;
+
+            for (let i = 1; i < rawPoints.length - 1; i++) {
+                let dx = rawPoints[i].x - rawPoints[lastIdx].x;
+                let dy = rawPoints[i].y - rawPoints[lastIdx].y;
+                let dist = Math.hypot(dx, dy);
+
+                if (dist < minDist) continue;
+
+                let nx = rawPoints[i+1].x - rawPoints[i].x;
+                let ny = rawPoints[i+1].y - rawPoints[i].y;
+                let normPrev = Math.hypot(dx, dy);
+                let normNext = Math.hypot(nx, ny);
+
+                if (normPrev > 0.001 && normNext > 0.001) {
+                    let cosVal = Math.max(-1, Math.min(1, (dx * nx + dy * ny) / (normPrev * normNext)));
+                    let angle = Math.acos(cosVal) * (180 / Math.PI);
+
+                    if (angle >= minAngleDeg || dist >= minDist * 2.0) {
+                        filtered.push(rawPoints[i]);
+                        lastIdx = i;
+                    }
+                }
+            }
+            filtered.push(rawPoints[rawPoints.length - 1]);
+
+            // Bounding Box ermitteln
+            let xs = filtered.map(p => p.x);
+            let ys = filtered.map(p => p.y);
+            let minX = Math.min(...xs), maxX = Math.max(...xs);
+            let minY = Math.min(...ys), maxY = Math.max(...ys);
+            let w = maxX - minX || 1, h = maxY - minY || 1;
+
+            // Zeichne Live-Vorschau auf Canvas
+            canvas.width = 600;
+            canvas.height = (h / w) * 600;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const scale = canvas.width / w;
+            const offsetX = -minX;
+            const offsetY = -minY;
+
+            function trans(p) {
+                return { x: (p.x + offsetX) * scale, y: (p.y + offsetY) * scale };
+            }
+
+            // Zeichne Richtungsstriche & Punkte
+            ctx.strokeStyle = "#000";
+            ctx.lineWidth = 1.5;
+            ctx.fillStyle = "#000";
+
+            let svgOutputNodes = '';
+
+            for (let i = 0; i < filtered.length - 1; i++) {
+                let p1 = trans(filtered[i]);
+                let p2 = trans(filtered[i+1]);
+
+                // Vektor für kurzen Strich
+                let vx = filtered[i+1].x - filtered[i].x;
+                let vy = filtered[i+1].y - filtered[i].y;
+                let len = Math.hypot(vx, vy) || 1;
+                let ux = vx / len, uy = vy / len;
+
+                // Strich-Endpunkt (ca. 6 Pixel lang für sauberen Tintenstrahl-Druck)
+                let tickLen = 6.0;
+                let tEnd = { x: filtered[i].x + ux * tickLen, y: filtered[i].y + uy * tickLen };
+                let pTickEnd = trans(tEnd);
+
+                // Canvas Strich zeichnen
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(pTickEnd.x, pTickEnd.y);
+                ctx.stroke();
+
+                // SVG Code für Export generieren
+                svgOutputNodes += `<line x1="${filtered[i].x}" y1="${filtered[i].y}" x2="${tEnd.x}" y2="${tEnd.y}" stroke="black" stroke-width="0.7"/>\n`;
+                svgOutputNodes += `<circle cx="${filtered[i].x}" cy="${filtered[i].y}" r="1.5" fill="black"/>\n`;
+
+                // Canvas Punkt
+                ctx.beginPath();
+                ctx.arc(p1.x, p1.y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Roter Startpunkt
+            let pStart = trans(filtered[0]);
+            ctx.fillStyle = "#E60000";
+            ctx.beginPath();
+            ctx.arc(pStart.x, pStart.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            svgOutputNodes += `<circle cx="${filtered[0].x}" cy="${filtered[0].y}" r="3.5" fill="#E60000"/>\n`;
+
+            canvas.style.display = 'block';
+
+            // Erstelle saubere SVG zum Download
+            processedSvgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - 10} ${minY - 10} {w + 20} {h + 20}" width="${w}px" height="${h}px">\n` +
+                                 `<rect width="100%" height="100%" fill="white"/>\n` +
+                                 svgOutputNodes +
+                                 `</svg>`;
+        }
+
+        downloadBtn.onclick = function() {
+            const blob = new Blob([processedSvgString], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'puzzle_vorlage.svg';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        };
+    </script>
+
+</body>
+</html>
