@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>Directional Dot-to-Dot Generator</title>
-    <!-- jsPDF Bibliothek für saubere Vektor-PDFs direkt im Browser -->
+    <!-- jsPDF Bibliothek -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         body {
@@ -16,7 +16,7 @@
             border: 2px solid #111;
             background: #fff;
         }
-        h2 { margin-top: 0; font-size: 1.4rem; letter-spacing: -0.5px; }
+        h2 { margin-top: 0; font-size: 1.4rem; }
         .dropzone {
             border: 2px dashed #111;
             padding: 40px;
@@ -24,7 +24,6 @@
             background: #fafafa;
             cursor: pointer;
             margin-bottom: 20px;
-            transition: background 0.2s;
         }
         .dropzone:hover { background: #f0f0f0; }
         button {
@@ -37,23 +36,24 @@
             cursor: pointer;
             font-family: monospace;
             display: none;
+            margin-top: 15px;
         }
         button:hover { background: #cc0000; }
-        #status { font-family: monospace; margin-top: 15px; font-size: 0.9rem; }
+        #status { font-family: monospace; margin-top: 15px; font-size: 0.95rem; padding: 10px; background: #eee; border-left: 4px solid #333; }
         canvas { border: 1px solid #ddd; margin-top: 20px; max-width: 100%; display: none; background: #fff; }
     </style>
 </head>
 <body>
 
-    <h2>Directional Dot-to-Dot Converter (PDF)</h2>
+    <h2>Directional Dot-to-Dot Generator</h2>
     <p>Ziehe deine FiniteCurve-SVG hierher oder klicke, um sie auszuwählen:</p>
 
-    <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
-        <span id="dropText">SVG-Datei hier ablegen (.svg)</span>
+    <div class="dropzone" id="dropzone">
+        <span id="dropText">SVG-Datei hier per Drag & Drop ablegen oder anklicken</span>
         <input type="file" id="fileInput" accept=".svg" style="display: none;">
     </div>
 
-    <div id="status"></div>
+    <div id="status">Bereit. Bitte SVG-Datei auswählen.</div>
     <button id="downloadBtn">⬇ DRUCKREIFE PDF HERUNTERLADEN</button>
     <br>
     <canvas id="previewCanvas"></canvas>
@@ -70,6 +70,7 @@
         let globalBounds = null;
         let originalFileName = "puzzle";
 
+        dropzone.addEventListener('click', () => fileInput.click());
         dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.background = '#e2e2e2'; });
         dropzone.addEventListener('dragleave', () => { dropzone.style.background = '#fafafa'; });
         dropzone.addEventListener('drop', (e) => {
@@ -88,10 +89,8 @@
             reader.onload = function(e) {
                 try {
                     processSVG(e.target.result);
-                    status.textContent = `Erfolgreich! ${globalFilteredPoints.length} Punkte extrahiert.`;
-                    downloadBtn.style.display = 'inline-block';
                 } catch (err) {
-                    status.textContent = "Fehler beim Verarbeiten: " + err.message;
+                    status.textContent = "❌ Fehler: " + err.message;
                     console.error(err);
                 }
             };
@@ -104,7 +103,7 @@
             
             let rawPoints = [];
             
-            // Exakte Vektor-Extraktion wie im funktionierenden Python-Skript
+            // Universeller Parser für FiniteCurve SVG-Strukturen
             doc.querySelectorAll('path, polyline, line, polygon').forEach(el => {
                 let d = el.getAttribute('d') || el.getAttribute('points') || '';
                 let nums = d.match(/[-+]?[0-9]*\.?[0-9]+/g);
@@ -116,20 +115,22 @@
                 }
             });
 
-            if (rawPoints.length < 5) throw new Error("Keine ausreichenden Pfade in der SVG gefunden.");
+            if (rawPoints.length < 5) {
+                throw new Error("Keine ausreichenden Koordinaten in der SVG gefunden.");
+            }
 
-            // Exakter Eck- und Kurvenfilter (min_dist_px = 12, min_angle = 8°)
+            // Exakter Ecken- und Kurvenfilter (min_dist_px = 25, min_angle = 8°)
             let filtered = [rawPoints[0]];
-            let lastIdx = 0;
+            let lastKeptIdx = 0;
             const minAngleDeg = 8.0;
-            const minDist = 12.0;
+            const minDistPx = 25.0;
 
             for (let i = 1; i < rawPoints.length - 1; i++) {
-                let dx = rawPoints[i].x - rawPoints[lastIdx].x;
-                let dy = rawPoints[i].y - rawPoints[lastIdx].y;
-                let dist = Math.hypot(dx, dy);
+                let dx = rawPoints[i].x - rawPoints[lastKeptIdx].x;
+                let dy = rawPoints[i].y - rawPoints[lastKeptIdx].y;
+                let distFromLast = Math.hypot(dx, dy);
 
-                if (dist < minDist) continue;
+                if (distFromLast < minDistPx) continue;
 
                 let nx = rawPoints[i+1].x - rawPoints[i].x;
                 let ny = rawPoints[i+1].y - rawPoints[i].y;
@@ -140,9 +141,9 @@
                     let cosVal = Math.max(-1, Math.min(1, (dx * nx + dy * ny) / (normPrev * normNext)));
                     let angle = Math.acos(cosVal) * (180 / Math.PI);
 
-                    if (angle >= minAngleDeg || dist >= minDist * 2.0) {
+                    if (angle >= minAngleDeg || distFromLast >= (minDistPx * 2.5)) {
                         filtered.push(rawPoints[i]);
-                        lastIdx = i;
+                        lastKeptIdx = i;
                     }
                 }
             }
@@ -157,7 +158,10 @@
             let w = maxX - minX || 1, h = maxY - minY || 1;
             globalBounds = { minX, minY, w, h };
 
-            // Vorschau auf Canvas zeichnen
+            status.textContent = `✅ Erfolgreich! ${rawPoints.length} Rohpunkte auf ${filtered.length} saubere Eckpunkte reduziert.`;
+            downloadBtn.style.display = 'inline-block';
+
+            // Vorschau zeichnen
             canvas.width = 600;
             canvas.height = (h / w) * 600;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -179,13 +183,12 @@
             for (let i = 0; i < filtered.length - 1; i++) {
                 let p1 = trans(filtered[i]);
                 
-                // Richtungsstrich (Ultrakurz für Inkjet)
                 let vx = filtered[i+1].x - filtered[i].x;
                 let vy = filtered[i+1].y - filtered[i].y;
                 let len = Math.hypot(vx, vy) || 1;
                 let ux = vx / len, uy = vy / len;
 
-                let tickLen = 5.0; // Kurzer Strich
+                let tickLen = 5.0; 
                 let tEnd = { x: filtered[i].x + ux * tickLen, y: filtered[i].y + uy * tickLen };
                 let pTickEnd = trans(tEnd);
 
@@ -199,7 +202,6 @@
                 ctx.fill();
             }
 
-            // Roter Startpunkt
             let pStart = trans(filtered[0]);
             ctx.fillStyle = "#E60000";
             ctx.beginPath();
@@ -213,8 +215,6 @@
             if (!globalFilteredPoints.length) return;
 
             const { jsPDF } = window.jspdf;
-            
-            // Definiere Druckformat: 12 Zoll Breite im Verhältnis
             let baseWidthInches = 12.0;
             let aspect = globalBounds.h / globalBounds.w;
             let baseHeightInches = baseWidthInches * aspect;
@@ -243,9 +243,8 @@
                 };
             }
 
-            // Zeichne Richtungsstriche ins PDF
             pdf.setDrawColor(0, 0, 0);
-            pdf.setLineWidth(0.007); // ca. 0.5 pt Strichstärke
+            pdf.setLineWidth(0.007); 
 
             for (let i = 0; i < globalFilteredPoints.length - 1; i++) {
                 let p1 = pdfTrans(globalFilteredPoints[i]);
@@ -255,7 +254,6 @@
                 let len = Math.hypot(vx, vy) || 1;
                 let ux = vx / len, uy = vy / len;
 
-                // Skaliere Strichlänge passend für Zoll-PDF (ca. 0.04 Zoll = ~3pt)
                 let tickLen = 0.04;
                 let tEnd = { 
                     x: globalFilteredPoints[i].x + ux * (tickLen * (globalBounds.w / drawW)), 
@@ -266,17 +264,15 @@
                 pdf.line(p1.x, p1.y, p2.x, p2.y);
             }
 
-            // Zeichne reguläre Punkte (Schwarz)
             pdf.setFillColor(0, 0, 0);
             for (let i = 1; i < globalFilteredPoints.length; i++) {
                 let pt = pdfTrans(globalFilteredPoints[i]);
-                pdf.circle(pt.x, pt.y, 0.015, 'F'); // ca. 2.1 pt Radius
+                pdf.circle(pt.x, pt.y, 0.015, 'F');
             }
 
-            // Zeichne Startpunkt (Rot)
             pdf.setFillColor(230, 0, 0);
             let startPt = pdfTrans(globalFilteredPoints[0]);
-            pdf.circle(startPt.x, startPt.y, 0.035, 'F'); // Größerer roter Startpunkt
+            pdf.circle(startPt.x, startPt.y, 0.035, 'F');
 
             pdf.save(originalFileName + "_inkjet_ticks.pdf");
         };
